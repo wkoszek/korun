@@ -1,4 +1,4 @@
-.PHONY: build test fmt lint check run clean release install
+.PHONY: build test fmt-check fmt lint check run clean release install
 
 # Build debug binary
 build:
