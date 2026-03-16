@@ -39,6 +39,8 @@ enum Commands {
     },
     /// Show head of session logs
     Head { id: String },
+    /// Run the daemon in the foreground (useful for systemd/launchd/Docker)
+    Daemon,
 }
 
 /// Entry point — plain fn main so we can fork BEFORE tokio threads start.
@@ -91,6 +93,10 @@ fn main() -> anyhow::Result<()> {
             Commands::Stop { id } => cli::cmd_stop(&id).await?,
             Commands::Tail { id, follow } => cli::cmd_tail(&id, follow).await?,
             Commands::Head { id } => cli::cmd_head(&id).await?,
+            Commands::Daemon => {
+                let addr: std::net::SocketAddr = "127.0.0.1:7777".parse().unwrap();
+                daemon::run_daemon(addr).await?;
+            }
             Commands::Serve { .. } => unreachable!("handled above"),
         }
         Ok::<(), anyhow::Error>(())
