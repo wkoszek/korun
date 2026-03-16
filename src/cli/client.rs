@@ -10,14 +10,13 @@ pub fn new_client() -> Client {
         .expect("reqwest client")
 }
 
+#[allow(dead_code)]
 pub async fn healthz(client: &Client, addr: &str) -> Result<bool> {
-    let resp = client
-        .get(format!("{addr}/healthz"))
-        .send()
-        .await?;
+    let resp = client.get(format!("{addr}/healthz")).send().await?;
     Ok(resp.status().is_success())
 }
 
+#[allow(dead_code)]
 pub async fn wait_for_daemon(addr: &str) -> Result<()> {
     let client = new_client();
     for _ in 0..50 {

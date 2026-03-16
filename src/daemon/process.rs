@@ -30,7 +30,9 @@ pub fn spawn_child(
     blended_buf: Arc<Mutex<LogBuffer>>,
     log_tx: broadcast::Sender<LogEntry>,
 ) -> anyhow::Result<SpawnedChild> {
-    let (prog, args) = command.split_first().ok_or_else(|| anyhow::anyhow!("empty command"))?;
+    let (prog, args) = command
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("empty command"))?;
 
     let mut cmd = Command::new(prog);
     cmd.args(args)
@@ -44,7 +46,9 @@ pub fn spawn_child(
     }
 
     let mut child = cmd.spawn()?;
-    let pid = child.id().ok_or_else(|| anyhow::anyhow!("child has no pid"))?;
+    let pid = child
+        .id()
+        .ok_or_else(|| anyhow::anyhow!("child has no pid"))?;
 
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -55,7 +59,14 @@ pub fn spawn_child(
         let blended_buf = Arc::clone(&blended_buf);
         let log_tx = log_tx.clone();
         tokio::spawn(async move {
-            read_stream(BufReader::new(stdout), Stream::Stdout, stdout_buf, blended_buf, log_tx).await;
+            read_stream(
+                BufReader::new(stdout),
+                Stream::Stdout,
+                stdout_buf,
+                blended_buf,
+                log_tx,
+            )
+            .await;
         });
     }
 
@@ -65,7 +76,14 @@ pub fn spawn_child(
         let blended_buf = Arc::clone(&blended_buf);
         let log_tx = log_tx.clone();
         tokio::spawn(async move {
-            read_stream(BufReader::new(stderr), Stream::Stderr, stderr_buf, blended_buf, log_tx).await;
+            read_stream(
+                BufReader::new(stderr),
+                Stream::Stderr,
+                stderr_buf,
+                blended_buf,
+                log_tx,
+            )
+            .await;
         });
     }
 
@@ -87,7 +105,12 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
                 let entry = {
                     let mut buf = stream_buf.lock().unwrap();
                     let seq = buf.push(stream, line.clone(), ts);
-                    LogEntry { seq, ts, stream, line: line.clone() }
+                    LogEntry {
+                        seq,
+                        ts,
+                        stream,
+                        line: line.clone(),
+                    }
                 };
                 {
                     let mut blended = blended_buf.lock().unwrap();
@@ -128,7 +151,15 @@ pub async fn run_supervisor(
                 })
                 .expect("session must exist")
             };
-            spawn_child(&command, &cwd, &env, stdout_buf, stderr_buf, blended_buf, log_tx)
+            spawn_child(
+                &command,
+                &cwd,
+                &env,
+                stdout_buf,
+                stderr_buf,
+                blended_buf,
+                log_tx,
+            )
         };
 
         let mut spawned = match spawn_result {
@@ -150,7 +181,7 @@ pub async fn run_supervisor(
         });
 
         // Wait for exit or command
-        let restart_after = loop {
+        let restart_after = 'select: {
             tokio::select! {
                 status = spawned.child.wait() => {
                     let (code, signal) = match status {
@@ -177,7 +208,7 @@ pub async fn run_supervisor(
                 cmd = cmd_rx.recv() => {
                     match cmd {
                         Some(SessionCommand::Stop) => {
-                            break false; // stop, don't restart
+                            break 'select false; // stop, don't restart
                         }
                         Some(SessionCommand::Restart { is_watch }) => {
                             // Increment counters immediately
@@ -189,7 +220,7 @@ pub async fn run_supervisor(
                                     s.manual_restart_count += 1;
                                 }
                             });
-                            break true; // restart
+                            break 'select true; // restart
                         }
                         None => return, // channel closed
                     }
@@ -225,4 +256,3 @@ pub async fn run_supervisor(
         mgr.with_mut(&session_id, |s| s.state = SessionState::Starting);
     }
 }
-

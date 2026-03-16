@@ -21,7 +21,7 @@ pub struct LogEntry {
 pub struct LogBuffer {
     entries: VecDeque<LogEntry>,
     capacity: usize,
-    seq_counter: u64,       // private; exposed via peek_next_seq()
+    seq_counter: u64, // private; exposed via peek_next_seq()
     pub dropped: u64,
     pub total_bytes: u64,
 }
@@ -47,7 +47,12 @@ impl LogBuffer {
             self.entries.pop_front();
             self.dropped += 1;
         }
-        self.entries.push_back(LogEntry { seq, ts, stream, line });
+        self.entries.push_back(LogEntry {
+            seq,
+            ts,
+            stream,
+            line,
+        });
         seq
     }
 
@@ -64,14 +69,26 @@ impl LogBuffer {
 
     /// Returns up to `limit` entries with seq >= n.
     pub fn since_seq(&self, n: u64, limit: usize) -> Vec<LogEntry> {
-        self.entries.iter().filter(|e| e.seq >= n).take(limit).cloned().collect()
+        self.entries
+            .iter()
+            .filter(|e| e.seq >= n)
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
-    pub fn len(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 
     /// The seq number that the next push() call will assign.
-    pub fn peek_next_seq(&self) -> u64 { self.seq_counter }
+    pub fn peek_next_seq(&self) -> u64 {
+        self.seq_counter
+    }
 }
 
 #[cfg(test)]
@@ -79,7 +96,9 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    fn ts() -> chrono::DateTime<Utc> { Utc::now() }
+    fn ts() -> chrono::DateTime<Utc> {
+        Utc::now()
+    }
 
     #[test]
     fn push_increments_seq() {
@@ -108,7 +127,9 @@ mod tests {
     #[test]
     fn tail_returns_newest_n() {
         let mut buf = LogBuffer::new(100);
-        for i in 0..10u64 { buf.push(Stream::Stdout, format!("line{i}"), ts()); }
+        for i in 0..10u64 {
+            buf.push(Stream::Stdout, format!("line{i}"), ts());
+        }
         let t = buf.tail(3);
         assert_eq!(t.len(), 3);
         assert_eq!(t[0].line, "line7");
@@ -118,7 +139,9 @@ mod tests {
     #[test]
     fn head_returns_oldest_n() {
         let mut buf = LogBuffer::new(100);
-        for i in 0..10u64 { buf.push(Stream::Stdout, format!("line{i}"), ts()); }
+        for i in 0..10u64 {
+            buf.push(Stream::Stdout, format!("line{i}"), ts());
+        }
         let h = buf.head(3);
         assert_eq!(h.len(), 3);
         assert_eq!(h[0].line, "line0");
@@ -128,7 +151,9 @@ mod tests {
     #[test]
     fn since_seq_filters_correctly() {
         let mut buf = LogBuffer::new(100);
-        for i in 0..10u64 { buf.push(Stream::Stdout, format!("line{i}"), ts()); }
+        for i in 0..10u64 {
+            buf.push(Stream::Stdout, format!("line{i}"), ts());
+        }
         let entries = buf.since_seq(5, 100);
         assert_eq!(entries.len(), 5);
         assert_eq!(entries[0].seq, 5);
@@ -138,7 +163,9 @@ mod tests {
     #[test]
     fn since_seq_respects_limit() {
         let mut buf = LogBuffer::new(100);
-        for i in 0..10u64 { buf.push(Stream::Stdout, format!("line{i}"), ts()); }
+        for i in 0..10u64 {
+            buf.push(Stream::Stdout, format!("line{i}"), ts());
+        }
         let entries = buf.since_seq(0, 3);
         assert_eq!(entries.len(), 3);
     }
@@ -148,7 +175,7 @@ mod tests {
         let mut buf = LogBuffer::new(100);
         buf.push(Stream::Stdout, "hello".into(), ts()); // 5+1=6
         buf.push(Stream::Stderr, "world".into(), ts()); // 5+1=6
-        buf.push(Stream::System, "diag".into(),  ts()); // ignored
+        buf.push(Stream::System, "diag".into(), ts()); // ignored
         assert_eq!(buf.total_bytes, 12);
     }
 

@@ -6,9 +6,9 @@ use axum::{
     Json,
 };
 use chrono::Utc;
+use futures::StreamExt;
 use serde::Deserialize;
 use std::collections::HashMap;
-use futures::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
@@ -91,7 +91,15 @@ pub async fn create_session(
         })
         .collect();
 
-    let session = Session::new(id, req.command, cwd, env, resolved_watch.clone(), cmd_tx.clone(), log_tx.clone());
+    let session = Session::new(
+        id,
+        req.command,
+        cwd,
+        env,
+        resolved_watch.clone(),
+        cmd_tx.clone(),
+        log_tx.clone(),
+    );
     mgr.insert(session);
 
     // Start watcher if paths given
@@ -110,7 +118,9 @@ pub async fn create_session(
                     s.last_change_at = Some(Utc::now());
                     s.last_change_path = Some(path.clone());
                 });
-                let _ = cmd_tx2.send(SessionCommand::Restart { is_watch: true }).await;
+                let _ = cmd_tx2
+                    .send(SessionCommand::Restart { is_watch: true })
+                    .await;
             }
         });
 
@@ -198,7 +208,9 @@ pub async fn restart_session(
 
     // If already stopping, return current state without queuing
     if state == SessionState::Stopping {
-        return Ok(Json(serde_json::json!({ "ok": true, "id": id, "state": state })));
+        return Ok(Json(
+            serde_json::json!({ "ok": true, "id": id, "state": state }),
+        ));
     }
 
     cmd_tx
@@ -206,7 +218,9 @@ pub async fn restart_session(
         .await
         .map_err(|_| AppError::Internal("supervisor task gone".into()))?;
 
-    Ok(Json(serde_json::json!({ "ok": true, "id": id, "state": "starting" })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "id": id, "state": "starting" }),
+    ))
 }
 
 // ── Stop ─────────────────────────────────────────────────────────────────────
@@ -220,11 +234,15 @@ pub async fn stop_session(
         .ok_or_else(|| AppError::NotFound("session not found".into()))?;
 
     if matches!(state, SessionState::Exited | SessionState::Failed) {
-        return Err(AppError::Conflict("session already in terminal state".into()));
+        return Err(AppError::Conflict(
+            "session already in terminal state".into(),
+        ));
     }
 
     if state == SessionState::Stopping {
-        return Ok(Json(serde_json::json!({ "ok": true, "id": id, "state": state })));
+        return Ok(Json(
+            serde_json::json!({ "ok": true, "id": id, "state": state }),
+        ));
     }
 
     cmd_tx
@@ -232,7 +250,9 @@ pub async fn stop_session(
         .await
         .map_err(|_| AppError::Internal("supervisor task gone".into()))?;
 
-    Ok(Json(serde_json::json!({ "ok": true, "id": id, "state": "stopping" })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "id": id, "state": "stopping" }),
+    ))
 }
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
@@ -259,11 +279,12 @@ pub async fn get_logs(
 
     let (entries, next_seq, log_tx) = mgr
         .with(&id, |s| {
-            let buf: std::sync::MutexGuard<'_, crate::daemon::buffer::LogBuffer> = match stream_name.as_str() {
-                "stdout" => s.stdout_buf.lock().unwrap(),
-                "stderr" => s.stderr_buf.lock().unwrap(),
-                _ => s.blended_buf.lock().unwrap(),
-            };
+            let buf: std::sync::MutexGuard<'_, crate::daemon::buffer::LogBuffer> =
+                match stream_name.as_str() {
+                    "stdout" => s.stdout_buf.lock().unwrap(),
+                    "stderr" => s.stderr_buf.lock().unwrap(),
+                    _ => s.blended_buf.lock().unwrap(),
+                };
             let entries = if let Some(seq) = q.since_seq {
                 buf.since_seq(seq, limit)
             } else {
@@ -319,7 +340,9 @@ pub async fn get_logs(
     // First send buffered entries, then stream new ones.
     // Use into_iter() + move to avoid capturing &format (which would prevent 'static bound).
     let format2 = format.clone();
-    let initial = entries.into_iter().map(move |e| Ok::<_, std::convert::Infallible>(format_entry(&e, &format2)));
+    let initial = entries
+        .into_iter()
+        .map(move |e| Ok::<_, std::convert::Infallible>(format_entry(&e, &format2)));
     let combined = futures::stream::iter(initial).chain(stream);
 
     Ok(Body::from_stream(combined).into_response())
@@ -335,11 +358,12 @@ pub async fn get_head(
     let format = q.format.clone().unwrap_or_else(|| "json".to_string());
 
     mgr.with(&id, |s| {
-        let buf: std::sync::MutexGuard<'_, crate::daemon::buffer::LogBuffer> = match stream_name.as_str() {
-            "stdout" => s.stdout_buf.lock().unwrap(),
-            "stderr" => s.stderr_buf.lock().unwrap(),
-            _ => s.blended_buf.lock().unwrap(),
-        };
+        let buf: std::sync::MutexGuard<'_, crate::daemon::buffer::LogBuffer> =
+            match stream_name.as_str() {
+                "stdout" => s.stdout_buf.lock().unwrap(),
+                "stderr" => s.stderr_buf.lock().unwrap(),
+                _ => s.blended_buf.lock().unwrap(),
+            };
         let entries = buf.head(limit);
         let next_seq = buf.peek_next_seq();
         drop(buf);
@@ -403,4 +427,3 @@ fn stream_label(s: Stream) -> &'static str {
         Stream::System => "system",
     }
 }
-

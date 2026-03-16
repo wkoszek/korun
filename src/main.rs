@@ -58,7 +58,13 @@ fn main() -> anyhow::Result<()> {
 
     // For the `serve` subcommand, we may need to fork the daemon before starting
     // any tokio threads. We do this here, synchronously, before building the runtime.
-    if let Commands::Serve { ref watch, ref env, ref cwd, ref command } = cli.command {
+    if let Commands::Serve {
+        ref watch,
+        ref env,
+        ref cwd,
+        ref command,
+    } = cli.command
+    {
         // Check if daemon is already running (blocking HTTP call)
         let daemon_running = is_daemon_running();
         if !daemon_running {
@@ -66,8 +72,7 @@ fn main() -> anyhow::Result<()> {
             daemonize_sync()?;
         }
         // Now it's safe to start the async runtime for the CLI POST
-        let (watch, env, cwd, command) =
-            (watch.clone(), env.clone(), cwd.clone(), command.clone());
+        let (watch, env, cwd, command) = (watch.clone(), env.clone(), cwd.clone(), command.clone());
         let rt = tokio::runtime::Runtime::new()?;
         return rt.block_on(async {
             tracing_subscriber::fmt::init();
@@ -129,7 +134,11 @@ fn daemonize_sync() -> anyhow::Result<()> {
         setsid()?;
         use std::fs::OpenOptions;
         use std::os::unix::io::IntoRawFd;
-        let devnull = OpenOptions::new().read(true).write(true).open("/dev/null")?.into_raw_fd();
+        let devnull = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null")?
+            .into_raw_fd();
         unsafe {
             libc::dup2(devnull, 0);
             libc::dup2(devnull, 1);
@@ -137,7 +146,9 @@ fn daemonize_sync() -> anyhow::Result<()> {
             libc::close(devnull);
         }
         let exe = std::env::current_exe()?;
-        std::process::Command::new(exe).arg("--daemon-internal").spawn()?;
+        std::process::Command::new(exe)
+            .arg("--daemon-internal")
+            .spawn()?;
         std::process::exit(0);
     }
 
@@ -160,7 +171,12 @@ fn wait_for_daemon_blocking() -> anyhow::Result<()> {
         .timeout(std::time::Duration::from_millis(500))
         .build()?;
     for _ in 0..50 {
-        if client.get("http://127.0.0.1:7777/healthz").send().map(|r| r.status().is_success()).unwrap_or(false) {
+        if client
+            .get("http://127.0.0.1:7777/healthz")
+            .send()
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+        {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));

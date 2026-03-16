@@ -1,8 +1,8 @@
 pub mod client;
 pub mod serve;
 
-use anyhow::Result;
 use crate::cli::client::{new_client, DEFAULT_ADDR};
+use anyhow::Result;
 
 pub async fn cmd_ls() -> Result<()> {
     let client = new_client();

@@ -14,14 +14,17 @@ pub fn start_watcher(
 ) -> anyhow::Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
     // new_debouncer takes a closure callback, not a channel.
     // We use blocking_send because the callback runs on a non-async thread.
-    let mut debouncer = new_debouncer(Duration::from_millis(250), move |result: DebounceEventResult| {
-        if let Ok(events) = result {
-            for event in events {
-                let path = event.path.to_string_lossy().to_string();
-                let _ = change_tx.blocking_send(path);
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(250),
+        move |result: DebounceEventResult| {
+            if let Ok(events) = result {
+                for event in events {
+                    let path = event.path.to_string_lossy().to_string();
+                    let _ = change_tx.blocking_send(path);
+                }
             }
-        }
-    })?;
+        },
+    )?;
 
     for path in &paths {
         debouncer

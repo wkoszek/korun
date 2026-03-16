@@ -3,8 +3,8 @@ use korun::daemon::buffer::{LogBuffer, Stream};
 use korun::daemon::process::spawn_child;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::broadcast;
 use std::time::Duration;
+use tokio::sync::broadcast;
 use tokio::time::sleep;
 
 #[tokio::test]
@@ -35,9 +35,9 @@ async fn spawn_echo_captures_stdout() {
     assert_eq!(entries[0].stream, Stream::Stdout);
 }
 
+use korun::daemon::process::run_supervisor;
 use korun::daemon::session::{Session, SessionCommand, SessionState};
 use korun::daemon::session_mgr::SessionManager;
-use korun::daemon::process::run_supervisor;
 use tokio::sync::mpsc;
 
 #[tokio::test]

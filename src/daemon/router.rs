@@ -1,9 +1,9 @@
+use crate::daemon::handlers::*;
+use crate::daemon::session_mgr::SessionManager;
 use axum::{
     routing::{get, post},
     Router,
 };
-use crate::daemon::handlers::*;
-use crate::daemon::session_mgr::SessionManager;
 
 pub fn build_router(mgr: SessionManager) -> Router {
     Router::new()

@@ -1,7 +1,7 @@
-use korun::daemon::router::build_router;
-use korun::daemon::session_mgr::SessionManager;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use korun::daemon::router::build_router;
+use korun::daemon::session_mgr::SessionManager;
 use tower::util::ServiceExt;
 
 #[tokio::test]
@@ -10,7 +10,12 @@ async fn healthz_returns_200() {
     let app = build_router(mgr);
 
     let response = app
-        .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -23,12 +28,19 @@ async fn list_sessions_empty() {
     let app = build_router(mgr);
 
     let response = app
-        .oneshot(Request::builder().uri("/v1/sessions").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/sessions")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["sessions"].as_array().unwrap().len(), 0);
 }
@@ -74,7 +86,9 @@ async fn create_session_returns_201() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::CREATED);
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(json["id"].as_str().is_some());
     assert_eq!(json["state"].as_str().unwrap(), "starting");

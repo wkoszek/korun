@@ -27,7 +27,9 @@ pub enum SessionState {
 pub enum SessionCommand {
     Stop,
     /// `is_watch` distinguishes file-watch-triggered from manual restart.
-    Restart { is_watch: bool },
+    Restart {
+        is_watch: bool,
+    },
 }
 
 /// The full session record stored in SessionManager.
@@ -107,7 +109,12 @@ impl Session {
     /// Uptime in milliseconds since last_started_at, or 0.
     pub fn uptime_ms(&self) -> u64 {
         self.last_started_at
-            .map(|t| Utc::now().signed_duration_since(t).num_milliseconds().max(0) as u64)
+            .map(|t| {
+                Utc::now()
+                    .signed_duration_since(t)
+                    .num_milliseconds()
+                    .max(0) as u64
+            })
             .unwrap_or(0)
     }
 }
@@ -118,9 +125,18 @@ mod tests {
 
     #[test]
     fn session_state_serializes() {
-        assert_eq!(serde_json::to_string(&SessionState::Running).unwrap(), "\"running\"");
-        assert_eq!(serde_json::to_string(&SessionState::Exited).unwrap(), "\"exited\"");
-        assert_eq!(serde_json::to_string(&SessionState::Failed).unwrap(), "\"failed\"");
+        assert_eq!(
+            serde_json::to_string(&SessionState::Running).unwrap(),
+            "\"running\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SessionState::Exited).unwrap(),
+            "\"exited\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SessionState::Failed).unwrap(),
+            "\"failed\""
+        );
     }
 
     #[test]
