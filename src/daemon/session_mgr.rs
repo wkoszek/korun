@@ -17,7 +17,7 @@ impl SessionManager {
     }
 
     pub fn insert(&self, session: Session) {
-        self.inner.write().unwrap().insert(session.id, session);
+        self.inner.write().unwrap_or_else(|e| e.into_inner()).insert(session.id, session);
     }
 
     /// Read-only access to a session via callback (avoids holding lock across await).
@@ -25,7 +25,7 @@ impl SessionManager {
     where
         F: FnOnce(&Session) -> R,
     {
-        self.inner.read().unwrap().get(id).map(f)
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).get(id).map(f)
     }
 
     /// Mutable access to a session via callback.
@@ -33,17 +33,17 @@ impl SessionManager {
     where
         F: FnOnce(&mut Session) -> R,
     {
-        self.inner.write().unwrap().get_mut(id).map(f)
+        self.inner.write().unwrap_or_else(|e| e.into_inner()).get_mut(id).map(f)
     }
 
     /// Returns Some(id) if session exists, None otherwise.
     pub fn get(&self, id: &Uuid) -> Option<Uuid> {
-        self.inner.read().unwrap().get(id).map(|s| s.id)
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).get(id).map(|s| s.id)
     }
 
     /// Returns ids of all sessions.
     pub fn list(&self) -> Vec<Uuid> {
-        self.inner.read().unwrap().keys().copied().collect()
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).keys().copied().collect()
     }
 }
 
