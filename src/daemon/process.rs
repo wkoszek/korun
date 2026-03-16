@@ -165,11 +165,8 @@ pub async fn run_supervisor(
         let mut spawned = match spawn_result {
             Ok(s) => s,
             Err(e) => {
-                mgr.with_mut(&session_id, |s| {
-                    s.state = SessionState::Failed;
-                    s.pid = None;
-                });
                 tracing::error!("failed to spawn session {session_id}: {e}");
+                mgr.remove(&session_id);
                 return;
             }
         };
@@ -183,26 +180,8 @@ pub async fn run_supervisor(
         // Wait for exit or command
         let restart_after = 'select: {
             tokio::select! {
-                status = spawned.child.wait() => {
-                    let (code, signal) = match status {
-                        Ok(s) => {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::process::ExitStatusExt;
-                                (s.code(), s.signal())
-                            }
-                            #[cfg(not(unix))]
-                            { (s.code(), None) }
-                        }
-                        Err(_) => (None, None),
-                    };
-                    mgr.with_mut(&session_id, |s| {
-                        s.state = SessionState::Exited;
-                        s.pid = None;
-                        s.exit_code = code;
-                        s.term_signal = signal;
-                        s.last_stopped_at = Some(Utc::now());
-                    });
+                _ = spawned.child.wait() => {
+                    mgr.remove(&session_id);
                     return; // no auto-restart on natural exit
                 }
                 cmd = cmd_rx.recv() => {
@@ -245,10 +224,7 @@ pub async fn run_supervisor(
         mgr.with_mut(&session_id, |s| s.pid = None);
 
         if !restart_after {
-            mgr.with_mut(&session_id, |s| {
-                s.state = SessionState::Exited;
-                s.last_stopped_at = Some(Utc::now());
-            });
+            mgr.remove(&session_id);
             return;
         }
 

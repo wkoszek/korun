@@ -57,6 +57,14 @@ impl SessionManager {
             .map(|s| s.id)
     }
 
+    /// Remove a session from the manager.
+    pub fn remove(&self, id: &Uuid) {
+        self.inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
+    }
+
     /// Returns ids of all sessions.
     pub fn list(&self) -> Vec<Uuid> {
         self.inner

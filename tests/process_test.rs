@@ -77,10 +77,9 @@ async fn supervisor_stop_transitions_to_exited() {
     };
     assert_eq!(state, SessionState::Running);
 
-    // Send stop
+    // Send stop — session is removed from manager once stopped
     cmd_tx.send(SessionCommand::Stop).await.unwrap();
     sleep(Duration::from_millis(500)).await;
 
-    let state = mgr.with(&id, |s| s.state).unwrap();
-    assert_eq!(state, SessionState::Exited);
+    assert!(mgr.with(&id, |s| s.state).is_none(), "session should be removed after stop");
 }

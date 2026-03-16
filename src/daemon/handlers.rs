@@ -233,12 +233,6 @@ pub async fn stop_session(
         .with(&id, |s| (s.state, s.cmd_tx.clone()))
         .ok_or_else(|| AppError::NotFound("session not found".into()))?;
 
-    if matches!(state, SessionState::Exited | SessionState::Failed) {
-        return Err(AppError::Conflict(
-            "session already in terminal state".into(),
-        ));
-    }
-
     if state == SessionState::Stopping {
         return Ok(Json(
             serde_json::json!({ "ok": true, "id": id, "state": state }),
