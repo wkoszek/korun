@@ -10,7 +10,7 @@ pub async fn serve_cmd(
     watch: Vec<String>,
     env_pairs: Vec<String>,
     cwd: Option<String>,
-) -> Result<()> {
+) -> Result<String> {
     let addr = DEFAULT_ADDR;
     let client = new_client();
 
@@ -47,6 +47,6 @@ pub async fn serve_cmd(
     }
 
     let json: serde_json::Value = resp.json().await?;
-    println!("{}", json["id"].as_str().unwrap_or("unknown"));
-    Ok(())
+    let id = json["id"].as_str().unwrap_or("unknown").to_string();
+    Ok(id)
 }

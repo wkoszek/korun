@@ -39,8 +39,17 @@ enum Commands {
     },
     /// Show head of session logs
     Head { id: String },
-    /// Run the daemon in the foreground (useful for systemd/launchd/Docker)
-    Daemon,
+    /// Start a session with the daemon backgrounded (prints session UUID and exits)
+    Daemon {
+        #[arg(long = "watch", short = 'w')]
+        watch: Vec<String>,
+        #[arg(long = "env", short = 'e')]
+        env: Vec<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 /// Entry point — plain fn main so we can fork BEFORE tokio threads start.
@@ -58,46 +67,50 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // For the `serve` subcommand, we may need to fork the daemon before starting
-    // any tokio threads. We do this here, synchronously, before building the runtime.
-    if let Commands::Serve {
+    // For `daemon`: fork the daemon to background before starting tokio threads.
+    if let Commands::Daemon {
         ref watch,
         ref env,
         ref cwd,
         ref command,
     } = cli.command
     {
-        // Check if daemon is already running (blocking HTTP call)
-        let daemon_running = is_daemon_running();
-        if !daemon_running {
+        if !is_daemon_running() {
             // Fork must happen HERE — before any tokio Runtime::new()
             daemonize_sync()?;
         }
-        // Now it's safe to start the async runtime for the CLI POST
         let (watch, env, cwd, command) = (watch.clone(), env.clone(), cwd.clone(), command.clone());
         let rt = tokio::runtime::Runtime::new()?;
         return rt.block_on(async {
             tracing_subscriber::fmt::init();
-            cli::serve::serve_cmd(command, watch, env, cwd).await
+            let id = cli::serve::serve_cmd(command, watch, env, cwd).await?;
+            println!("{id}");
+            Ok(())
         });
     }
 
-    // All other subcommands: just start the runtime
+    // All other subcommands: start the runtime.
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         tracing_subscriber::fmt::init();
         match cli.command {
+            Commands::Serve { watch, env, cwd, command } => {
+                let addr: std::net::SocketAddr = "127.0.0.1:7777".parse().unwrap();
+                if !is_daemon_running() {
+                    tokio::spawn(daemon::run_daemon(addr));
+                    cli::client::wait_for_daemon(cli::client::DEFAULT_ADDR).await?;
+                }
+                let id = cli::serve::serve_cmd(command, watch, env, cwd).await?;
+                eprintln!("session: {id}");
+                cli::cmd_tail(&id, true).await?;
+            }
             Commands::Ls => cli::cmd_ls().await?,
             Commands::Inspect { id } => cli::cmd_inspect(&id).await?,
             Commands::Restart { id } => cli::cmd_restart(&id).await?,
             Commands::Stop { id } => cli::cmd_stop(&id).await?,
             Commands::Tail { id, follow } => cli::cmd_tail(&id, follow).await?,
             Commands::Head { id } => cli::cmd_head(&id).await?,
-            Commands::Daemon => {
-                let addr: std::net::SocketAddr = "127.0.0.1:7777".parse().unwrap();
-                daemon::run_daemon(addr).await?;
-            }
-            Commands::Serve { .. } => unreachable!("handled above"),
+            Commands::Daemon { .. } => unreachable!("handled above"),
         }
         Ok::<(), anyhow::Error>(())
     })
