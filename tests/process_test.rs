@@ -63,10 +63,18 @@ async fn supervisor_stop_transitions_to_exited() {
         run_supervisor(id, mgr2, cmd_rx).await;
     });
 
-    sleep(Duration::from_millis(200)).await; // let it start
-
-    // Verify running
-    let state = mgr.with(&id, |s| s.state).unwrap();
+    // Wait up to 2s for the supervisor to reach Running state
+    let state = {
+        let mut final_state = SessionState::Starting;
+        for _ in 0..40 {
+            sleep(Duration::from_millis(50)).await;
+            final_state = mgr.with(&id, |s| s.state).unwrap();
+            if final_state == SessionState::Running {
+                break;
+            }
+        }
+        final_state
+    };
     assert_eq!(state, SessionState::Running);
 
     // Send stop

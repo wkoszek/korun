@@ -80,18 +80,27 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
     log_tx: broadcast::Sender<LogEntry>,
 ) {
     let mut lines = reader.lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        let ts = Utc::now();
-        let entry = {
-            let mut buf = stream_buf.lock().unwrap();
-            let seq = buf.push(stream, line.clone(), ts);
-            LogEntry { seq, ts, stream, line: line.clone() }
-        };
-        {
-            let mut blended = blended_buf.lock().unwrap();
-            blended.push(stream, line, ts);
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                let ts = Utc::now();
+                let entry = {
+                    let mut buf = stream_buf.lock().unwrap();
+                    let seq = buf.push(stream, line.clone(), ts);
+                    LogEntry { seq, ts, stream, line: line.clone() }
+                };
+                {
+                    let mut blended = blended_buf.lock().unwrap();
+                    blended.push(stream, line, ts);
+                }
+                let _ = log_tx.send(entry);
+            }
+            Ok(None) => break, // EOF
+            Err(e) => {
+                tracing::warn!("read_stream I/O error ({:?}): {e}", stream);
+                break;
+            }
         }
-        let _ = log_tx.send(entry);
     }
 }
 
@@ -191,7 +200,6 @@ pub async fn run_supervisor(
         // Graceful stop
         mgr.with_mut(&session_id, |s| {
             s.state = SessionState::Stopping;
-            s.last_stopped_at = Some(Utc::now());
         });
 
         let pid = spawned.pid as i32;
@@ -206,7 +214,10 @@ pub async fn run_supervisor(
         mgr.with_mut(&session_id, |s| s.pid = None);
 
         if !restart_after {
-            mgr.with_mut(&session_id, |s| s.state = SessionState::Exited);
+            mgr.with_mut(&session_id, |s| {
+                s.state = SessionState::Exited;
+                s.last_stopped_at = Some(Utc::now());
+            });
             return;
         }
 
