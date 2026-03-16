@@ -77,4 +77,5 @@ async fn create_session_returns_201() {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(json["id"].as_str().is_some());
+    assert_eq!(json["state"].as_str().unwrap(), "starting");
 }

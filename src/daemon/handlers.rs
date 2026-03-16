@@ -287,9 +287,14 @@ pub async fn get_logs(
     let stream = BroadcastStream::new(rx).flat_map(move |msg| {
         let line = match msg {
             Ok(entry) => {
-                if stream_name_clone != "blended"
-                    && entry.stream != stream_from_str(&stream_name_clone)
-                {
+                // Filter: for blended, show all; for stdout/stderr, show only that stream; for unknown, show nothing
+                let should_include = match stream_name_clone.as_str() {
+                    "blended" => true,
+                    "stdout" => entry.stream == Stream::Stdout,
+                    "stderr" => entry.stream == Stream::Stderr,
+                    _ => false, // unknown stream name → no entries
+                };
+                if !should_include {
                     return futures::stream::empty().left_stream();
                 }
                 format_entry(&entry, &format_clone)
@@ -399,10 +404,3 @@ fn stream_label(s: Stream) -> &'static str {
     }
 }
 
-fn stream_from_str(s: &str) -> Stream {
-    match s {
-        "stdout" => Stream::Stdout,
-        "stderr" => Stream::Stderr,
-        _ => Stream::System,
-    }
-}
