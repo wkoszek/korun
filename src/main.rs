@@ -16,6 +16,9 @@ enum Commands {
     Serve {
         #[arg(long = "watch", short = 'w')]
         watch: Vec<String>,
+        /// Read watch paths from a file (one path per line)
+        #[arg(long = "watch-file", short = 'W')]
+        watch_file: Option<String>,
         #[arg(long = "env", short = 'e')]
         env: Vec<String>,
         #[arg(long)]
@@ -25,24 +28,32 @@ enum Commands {
     },
     /// List all sessions
     Ls,
-    /// Inspect a session
-    Inspect { id: String },
-    /// Restart a session
-    Restart { id: String },
-    /// Stop a session
-    Stop { id: String },
-    /// Stream tail of session logs
+    /// Inspect a session (omit UUID if only one session is active)
+    Inspect { id: Option<String> },
+    /// Restart a session (omit UUID if only one session is active)
+    Restart { id: Option<String> },
+    /// Stop a session (omit UUID if only one session is active, or use --all)
+    Stop {
+        id: Option<String>,
+        /// Stop all active sessions
+        #[arg(long, conflicts_with = "id")]
+        all: bool,
+    },
+    /// Stream tail of session logs (omit UUID if only one session is active)
     Tail {
-        id: String,
+        id: Option<String>,
         #[arg(short = 'f', long)]
         follow: bool,
     },
-    /// Show head of session logs
-    Head { id: String },
+    /// Show head of session logs (omit UUID if only one session is active)
+    Head { id: Option<String> },
     /// Start a session with the daemon backgrounded (prints session UUID and exits)
     Daemon {
         #[arg(long = "watch", short = 'w')]
         watch: Vec<String>,
+        /// Read watch paths from a file (one path per line)
+        #[arg(long = "watch-file", short = 'W')]
+        watch_file: Option<String>,
         #[arg(long = "env", short = 'e')]
         env: Vec<String>,
         #[arg(long)]
@@ -70,6 +81,7 @@ fn main() -> anyhow::Result<()> {
     // For `daemon`: fork the daemon to background before starting tokio threads.
     if let Commands::Daemon {
         ref watch,
+        ref watch_file,
         ref env,
         ref cwd,
         ref command,
@@ -79,10 +91,17 @@ fn main() -> anyhow::Result<()> {
             // Fork must happen HERE — before any tokio Runtime::new()
             daemonize_sync()?;
         }
-        let (watch, env, cwd, command) = (watch.clone(), env.clone(), cwd.clone(), command.clone());
+        let (watch, watch_file, env, cwd, command) = (
+            watch.clone(),
+            watch_file.clone(),
+            env.clone(),
+            cwd.clone(),
+            command.clone(),
+        );
         let rt = tokio::runtime::Runtime::new()?;
         return rt.block_on(async {
             tracing_subscriber::fmt::init();
+            let watch = cli::load_watch_paths(watch, watch_file)?;
             let id = cli::serve::serve_cmd(command, watch, env, cwd).await?;
             println!("{id}");
             Ok(())
@@ -94,22 +113,29 @@ fn main() -> anyhow::Result<()> {
     rt.block_on(async {
         tracing_subscriber::fmt::init();
         match cli.command {
-            Commands::Serve { watch, env, cwd, command } => {
+            Commands::Serve { watch, watch_file, env, cwd, command } => {
                 let addr: std::net::SocketAddr = "127.0.0.1:7777".parse().unwrap();
                 if !is_daemon_running() {
                     tokio::spawn(daemon::run_daemon(addr));
                     cli::client::wait_for_daemon(cli::client::DEFAULT_ADDR).await?;
                 }
+                let watch = cli::load_watch_paths(watch, watch_file)?;
                 let id = cli::serve::serve_cmd(command, watch, env, cwd).await?;
                 eprintln!("session: {id}");
-                cli::cmd_tail(&id, true).await?;
+                cli::cmd_tail(Some(id), true).await?;
             }
             Commands::Ls => cli::cmd_ls().await?,
-            Commands::Inspect { id } => cli::cmd_inspect(&id).await?,
-            Commands::Restart { id } => cli::cmd_restart(&id).await?,
-            Commands::Stop { id } => cli::cmd_stop(&id).await?,
-            Commands::Tail { id, follow } => cli::cmd_tail(&id, follow).await?,
-            Commands::Head { id } => cli::cmd_head(&id).await?,
+            Commands::Inspect { id } => cli::cmd_inspect(id).await?,
+            Commands::Restart { id } => cli::cmd_restart(id).await?,
+            Commands::Stop { id, all } => {
+                if all {
+                    cli::cmd_stop_all().await?;
+                } else {
+                    cli::cmd_stop(id).await?;
+                }
+            }
+            Commands::Tail { id, follow } => cli::cmd_tail(id, follow).await?,
+            Commands::Head { id } => cli::cmd_head(id).await?,
             Commands::Daemon { .. } => unreachable!("handled above"),
         }
         Ok::<(), anyhow::Error>(())
