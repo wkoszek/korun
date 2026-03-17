@@ -4,15 +4,13 @@ use nix::unistd::Pid;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::daemon::buffer::{LogBuffer, LogEntry, Stream};
-use crate::daemon::session::{SessionCommand, SessionState, GRACE_PERIOD_SECS};
+use crate::daemon::session::{SessionCommand, SessionState};
 use crate::daemon::session_mgr::SessionManager;
 
 pub struct SpawnedChild {
@@ -39,7 +37,8 @@ pub fn spawn_child(
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
     for (k, v) in env_overrides {
         cmd.env(k, v);
@@ -207,19 +206,14 @@ pub async fn run_supervisor(
             }
         };
 
-        // Graceful stop
+        // Hard kill: SIGKILL immediately, no grace period
         mgr.with_mut(&session_id, |s| {
             s.state = SessionState::Stopping;
         });
 
         let pid = spawned.pid as i32;
-        let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
-
-        let grace = Duration::from_secs(GRACE_PERIOD_SECS);
-        if timeout(grace, spawned.child.wait()).await.is_err() {
-            let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
-            let _ = spawned.child.wait().await;
-        }
+        let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+        let _ = spawned.child.wait().await;
 
         mgr.with_mut(&session_id, |s| s.pid = None);
 

@@ -4,7 +4,22 @@ mod cli;
 mod daemon;
 
 #[derive(Parser)]
-#[command(name = "korun", about = "Local developer process runner")]
+#[command(
+    name = "korun",
+    about = "Local developer process runner",
+    after_help = "\
+EXAMPLES:
+  korun serve -- cargo run              # run in foreground, stream logs
+  korun serve -w src -- cargo run       # restart on src/ changes
+  korun serve -W watch.txt -- npm start # watch paths from file
+  korun daemon -- cargo run             # background; prints session UUID
+  korun ls                              # list sessions
+  korun tail -f                         # follow logs (auto UUID if 1 session)
+  korun tail -f <UUID>                  # follow logs for specific session
+  korun restart                         # restart (auto UUID if 1 session)
+  korun stop --all                      # stop all sessions
+  korun inspect                         # full session metadata"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

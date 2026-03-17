@@ -9,7 +9,6 @@ use crate::daemon::buffer::LogBuffer;
 pub const STDOUT_BUF_CAPACITY: usize = 10_000;
 pub const STDERR_BUF_CAPACITY: usize = 10_000;
 pub const BLENDED_BUF_CAPACITY: usize = 20_000;
-pub const GRACE_PERIOD_SECS: u64 = 2;
 pub const BROADCAST_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -57,6 +57,18 @@ impl SessionManager {
             .map(|s| s.id)
     }
 
+    /// Returns all (id, cmd_tx) pairs — used for daemon shutdown to kill all sessions.
+    pub fn all_cmd_txs(
+        &self,
+    ) -> Vec<(Uuid, tokio::sync::mpsc::Sender<crate::daemon::session::SessionCommand>)> {
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(id, s)| (*id, s.cmd_tx.clone()))
+            .collect()
+    }
+
     /// Remove a session from the manager.
     pub fn remove(&self, id: &Uuid) {
         self.inner
