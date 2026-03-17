@@ -130,10 +130,12 @@ pub async fn create_session(
         }
     }
 
-    // Launch supervisor
+    // Launch supervisor — cleanup wrapper guarantees removal on any exit path
     let mgr3 = mgr.clone();
+    let mgr_cleanup = mgr.clone();
     tokio::spawn(async move {
         run_supervisor(id, mgr3, cmd_rx).await;
+        mgr_cleanup.remove(&id); // no-op if supervisor already removed it
     });
 
     Ok((
