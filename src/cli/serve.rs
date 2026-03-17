@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 
 // Note: daemon auto-start and fork logic is in main.rs (before tokio runtime starts).
@@ -39,14 +39,19 @@ pub async fn serve_cmd(
         .post(format!("{addr}/v1/sessions"))
         .json(&body)
         .send()
-        .await?;
+        .await
+        .context("POST /v1/sessions")?;
 
     if !resp.status().is_success() {
-        let text = resp.text().await?;
-        anyhow::bail!("failed to create session: {text}");
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("failed to create session (HTTP {status}): {text}");
     }
 
-    let json: serde_json::Value = resp.json().await?;
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .context("decoding create session response")?;
     let id = json["id"].as_str().unwrap_or("unknown").to_string();
     Ok(id)
 }

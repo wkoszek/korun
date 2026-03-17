@@ -3,11 +3,19 @@ use reqwest::Client;
 
 pub const DEFAULT_ADDR: &str = "http://127.0.0.1:7777";
 
+/// Standard client with 10s timeout — for all non-streaming requests.
 pub fn new_client() -> Client {
     Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("reqwest client")
+}
+
+/// No-timeout client — for streaming endpoints (tail -f, logs follow=1).
+pub fn new_streaming_client() -> Client {
+    Client::builder()
+        .build()
+        .expect("reqwest streaming client")
 }
 
 #[allow(dead_code)]

@@ -1,8 +1,8 @@
 pub mod client;
 pub mod serve;
 
-use crate::cli::client::{new_client, DEFAULT_ADDR};
-use anyhow::Result;
+use crate::cli::client::{new_client, new_streaming_client, DEFAULT_ADDR};
+use anyhow::{Context, Result};
 
 /// If `id` is Some, return it. If None and exactly one session is active, return its ID.
 /// Otherwise error.
@@ -132,17 +132,28 @@ pub async fn cmd_stop_all() -> Result<()> {
 
 pub async fn cmd_tail(id: Option<String>, follow: bool) -> Result<()> {
     let id = resolve_id(id).await?;
-    let client = new_client();
     let follow_param = if follow { "1" } else { "0" };
     let url = format!("{DEFAULT_ADDR}/v1/sessions/{id}/tail?follow={follow_param}&format=text");
 
     if follow {
-        let mut resp = client.get(&url).send().await?;
-        while let Some(chunk) = resp.chunk().await? {
+        // No timeout — stream stays open until the user Ctrl-Cs or the session ends
+        let mut resp = new_streaming_client()
+            .get(&url)
+            .send()
+            .await
+            .context("connecting to daemon for log stream")?;
+        while let Some(chunk) = resp.chunk().await.context("reading log stream")? {
             print!("{}", String::from_utf8_lossy(&chunk));
         }
     } else {
-        let text = client.get(&url).send().await?.text().await?;
+        let text = new_client()
+            .get(&url)
+            .send()
+            .await
+            .context("GET tail")?
+            .text()
+            .await
+            .context("reading tail response")?;
         print!("{text}");
     }
     Ok(())
