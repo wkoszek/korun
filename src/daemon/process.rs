@@ -38,7 +38,12 @@ pub fn spawn_child(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .kill_on_drop(true); // fallback: kills direct child if supervisor drops
+
+    // Put child in its own process group so killing -pgid kills the whole tree
+    // (e.g. `cargo run` → `coreapp-server` both die)
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     for (k, v) in env_overrides {
         cmd.env(k, v);
@@ -212,6 +217,12 @@ pub async fn run_supervisor(
         });
 
         let pid = spawned.pid as i32;
+        // Kill the entire process group (negative PID) to catch grandchildren
+        // such as the binary spawned by `cargo run`. Falls back to direct kill
+        // on non-Unix where process groups aren't used.
+        #[cfg(unix)]
+        let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
+        #[cfg(not(unix))]
         let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
         let _ = spawned.child.wait().await;
 
