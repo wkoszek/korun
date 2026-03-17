@@ -137,7 +137,16 @@ fn main() -> anyhow::Result<()> {
                 let watch = cli::load_watch_paths(watch, watch_file)?;
                 let id = cli::serve::serve_cmd(command, watch, env, cwd).await?;
                 eprintln!("session: {id}");
-                cli::cmd_tail(Some(id), true).await?;
+                // Race log tail against Ctrl-C so signal is registered immediately.
+                // On Ctrl-C: stop all sessions (process-group SIGKILL) before exiting.
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("\nshutting down...");
+                        cli::cmd_stop_all().await.ok();
+                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    }
+                    result = cli::cmd_tail(Some(id), true) => { result?; }
+                }
             }
             Commands::Ls => cli::cmd_ls().await?,
             Commands::Inspect { id } => cli::cmd_inspect(id).await?,
