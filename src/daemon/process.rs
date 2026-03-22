@@ -2,6 +2,7 @@ use chrono::Utc;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -19,10 +20,12 @@ pub struct SpawnedChild {
 }
 
 /// Spawn the child process and start stdout/stderr reader tasks.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_child(
     command: &[String],
     cwd: &str,
     env_overrides: &HashMap<String, String>,
+    next_seq: Arc<AtomicU64>,
     stdout_buf: Arc<Mutex<LogBuffer>>,
     stderr_buf: Arc<Mutex<LogBuffer>>,
     blended_buf: Arc<Mutex<LogBuffer>>,
@@ -62,10 +65,12 @@ pub fn spawn_child(
         let stdout_buf = Arc::clone(&stdout_buf);
         let blended_buf = Arc::clone(&blended_buf);
         let log_tx = log_tx.clone();
+        let next_seq_stdout = next_seq.clone();
         tokio::spawn(async move {
             read_stream(
                 BufReader::new(stdout),
                 Stream::Stdout,
+                next_seq_stdout,
                 stdout_buf,
                 blended_buf,
                 log_tx,
@@ -79,10 +84,12 @@ pub fn spawn_child(
         let stderr_buf = Arc::clone(&stderr_buf);
         let blended_buf = Arc::clone(&blended_buf);
         let log_tx = log_tx.clone();
+        let next_seq_stderr = next_seq;
         tokio::spawn(async move {
             read_stream(
                 BufReader::new(stderr),
                 Stream::Stderr,
+                next_seq_stderr,
                 stderr_buf,
                 blended_buf,
                 log_tx,
@@ -97,6 +104,7 @@ pub fn spawn_child(
 async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
     reader: BufReader<R>,
     stream: Stream,
+    next_seq: Arc<AtomicU64>,
     stream_buf: Arc<Mutex<LogBuffer>>,
     blended_buf: Arc<Mutex<LogBuffer>>,
     log_tx: broadcast::Sender<LogEntry>,
@@ -106,9 +114,10 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
         match lines.next_line().await {
             Ok(Some(line)) => {
                 let ts = Utc::now();
+                let seq = next_seq.fetch_add(1, Ordering::Relaxed);
                 let entry = {
                     let mut buf = stream_buf.lock().unwrap();
-                    let seq = buf.push(stream, line.clone(), ts);
+                    buf.push_with_seq(seq, stream, line.clone(), ts);
                     LogEntry {
                         seq,
                         ts,
@@ -118,7 +127,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
                 };
                 {
                     let mut blended = blended_buf.lock().unwrap();
-                    blended.push(stream, line, ts);
+                    blended.push_with_seq(seq, stream, line, ts);
                 }
                 let _ = log_tx.send(entry);
             }
@@ -139,101 +148,215 @@ pub async fn run_supervisor(
     mut cmd_rx: mpsc::Receiver<SessionCommand>,
 ) {
     loop {
-        // Spawn child
-        let spawn_result = {
-            let (command, cwd, env, stdout_buf, stderr_buf, blended_buf, log_tx) = {
-                mgr.with(&session_id, |s| {
-                    (
-                        s.command.clone(),
-                        s.cwd.clone(),
-                        s.env_overrides.clone(),
-                        Arc::clone(&s.stdout_buf),
-                        Arc::clone(&s.stderr_buf),
-                        Arc::clone(&s.blended_buf),
-                        s.log_tx.clone(),
+        let state = match mgr.with(&session_id, |s| s.state) {
+            Some(state) => state,
+            None => return,
+        };
+
+        match state {
+            SessionState::Starting => {
+                let spawn_result = {
+                    let (command, cwd, env, next_seq, stdout_buf, stderr_buf, blended_buf, log_tx) =
+                        match mgr.with(&session_id, |s| {
+                            (
+                                s.command.clone(),
+                                s.cwd.clone(),
+                                s.env_overrides.clone(),
+                                Arc::clone(&s.next_log_seq),
+                                Arc::clone(&s.stdout_buf),
+                                Arc::clone(&s.stderr_buf),
+                                Arc::clone(&s.blended_buf),
+                                s.log_tx.clone(),
+                            )
+                        }) {
+                            Some(values) => values,
+                            None => return,
+                        };
+                    spawn_child(
+                        &command,
+                        &cwd,
+                        &env,
+                        next_seq,
+                        stdout_buf,
+                        stderr_buf,
+                        blended_buf,
+                        log_tx,
                     )
-                })
-                .expect("session must exist")
-            };
-            spawn_child(
-                &command,
-                &cwd,
-                &env,
-                stdout_buf,
-                stderr_buf,
-                blended_buf,
-                log_tx,
-            )
-        };
+                };
 
-        let mut spawned = match spawn_result {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("failed to spawn session {session_id}: {e}");
-                mgr.remove(&session_id);
-                return;
-            }
-        };
-
-        mgr.with_mut(&session_id, |s| {
-            s.state = SessionState::Running;
-            s.pid = Some(spawned.pid);
-            s.last_started_at = Some(Utc::now());
-        });
-
-        // Wait for exit or command
-        let restart_after = 'select: {
-            tokio::select! {
-                _ = spawned.child.wait() => {
-                    mgr.remove(&session_id);
-                    return; // no auto-restart on natural exit
-                }
-                cmd = cmd_rx.recv() => {
-                    match cmd {
-                        Some(SessionCommand::Stop) => {
-                            break 'select false; // stop, don't restart
+                match spawn_result {
+                    Ok(spawned) => {
+                        mgr.with_mut(&session_id, |s| {
+                            s.clear_exit_metadata();
+                            s.state = SessionState::Running;
+                            s.pid = Some(spawned.pid);
+                            s.last_started_at = Some(Utc::now());
+                        });
+                        if supervise_running_session(session_id, &mgr, &mut cmd_rx, spawned).await {
+                            continue;
                         }
-                        Some(SessionCommand::Restart { is_watch }) => {
-                            // Increment counters immediately
-                            mgr.with_mut(&session_id, |s| {
-                                s.restart_count += 1;
-                                if is_watch {
-                                    s.watch_restart_count += 1;
-                                } else {
-                                    s.manual_restart_count += 1;
-                                }
-                            });
-                            break 'select true; // restart
-                        }
-                        None => return, // channel closed
+                    }
+                    Err(e) => {
+                        tracing::error!("failed to spawn session {session_id}: {e}");
+                        mgr.with_mut(&session_id, |s| {
+                            s.state = SessionState::Failed;
+                            s.pid = None;
+                            s.last_stopped_at = Some(Utc::now());
+                            s.exit_code = None;
+                            s.term_signal = None;
+                        });
                     }
                 }
             }
-        };
-
-        // Hard kill: SIGKILL immediately, no grace period
-        mgr.with_mut(&session_id, |s| {
-            s.state = SessionState::Stopping;
-        });
-
-        let pid = spawned.pid as i32;
-        // Kill the entire process group (negative PID) to catch grandchildren
-        // such as the binary spawned by `cargo run`. Falls back to direct kill
-        // on non-Unix where process groups aren't used.
-        #[cfg(unix)]
-        let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
-        #[cfg(not(unix))]
-        let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
-        let _ = spawned.child.wait().await;
-
-        mgr.with_mut(&session_id, |s| s.pid = None);
-
-        if !restart_after {
-            mgr.remove(&session_id);
-            return;
+            SessionState::Running => {
+                tracing::warn!("session {session_id} entered supervisor loop in running state");
+                mgr.with_mut(&session_id, |s| s.state = SessionState::Starting);
+            }
+            SessionState::Stopping => {
+                tracing::warn!("session {session_id} entered supervisor loop in stopping state");
+                mgr.with_mut(&session_id, |s| s.state = SessionState::Exited);
+            }
+            SessionState::Exited | SessionState::Failed => {
+                let cmd = match cmd_rx.recv().await {
+                    Some(cmd) => cmd,
+                    None => return,
+                };
+                match cmd {
+                    SessionCommand::Restart { is_watch } => {
+                        mgr.with_mut(&session_id, |s| {
+                            s.restart_count += 1;
+                            if is_watch {
+                                s.watch_restart_count += 1;
+                            } else {
+                                s.manual_restart_count += 1;
+                            }
+                            s.clear_exit_metadata();
+                            s.state = SessionState::Starting;
+                            s.pid = None;
+                        });
+                    }
+                    SessionCommand::Stop => {}
+                }
+            }
         }
-
-        // Loop continues → restart
-        mgr.with_mut(&session_id, |s| s.state = SessionState::Starting);
     }
+}
+
+async fn supervise_running_session(
+    session_id: Uuid,
+    mgr: &SessionManager,
+    cmd_rx: &mut mpsc::Receiver<SessionCommand>,
+    mut spawned: SpawnedChild,
+) -> bool {
+    let restart_after = 'select: {
+        tokio::select! {
+            status = spawned.child.wait() => {
+                match status {
+                    Ok(status) => record_terminal_exit(mgr, &session_id, SessionState::Exited, status),
+                    Err(e) => {
+                        tracing::error!("failed to wait on session {session_id}: {e}");
+                        mgr.with_mut(&session_id, |s| {
+                            s.state = SessionState::Failed;
+                            s.pid = None;
+                            s.last_stopped_at = Some(Utc::now());
+                            s.exit_code = None;
+                            s.term_signal = None;
+                        });
+                    }
+                }
+                return false;
+            }
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(SessionCommand::Stop) => {
+                        break 'select false;
+                    }
+                    Some(SessionCommand::Restart { is_watch }) => {
+                        mgr.with_mut(&session_id, |s| {
+                            s.restart_count += 1;
+                            if is_watch {
+                                s.watch_restart_count += 1;
+                            } else {
+                                s.manual_restart_count += 1;
+                            }
+                        });
+                        break 'select true;
+                    }
+                    None => return false,
+                }
+            }
+        }
+    };
+
+    mgr.with_mut(&session_id, |s| {
+        s.state = SessionState::Stopping;
+    });
+
+    let status = terminate_child(&mut spawned).await;
+    record_terminal_exit(mgr, &session_id, SessionState::Exited, status);
+
+    if restart_after {
+        mgr.with_mut(&session_id, |s| {
+            s.clear_exit_metadata();
+            s.state = SessionState::Starting;
+        });
+    }
+
+    restart_after
+}
+
+async fn terminate_child(child: &mut SpawnedChild) -> std::process::ExitStatus {
+    let pid = child.pid as i32;
+    #[cfg(unix)]
+    let _ = kill(Pid::from_raw(-pid), Signal::SIGTERM);
+    #[cfg(not(unix))]
+    let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
+
+    match tokio::time::timeout(std::time::Duration::from_secs(2), child.child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => {
+            tracing::warn!("failed while waiting for child shutdown: {e}");
+            child
+                .child
+                .wait()
+                .await
+                .expect("child wait after shutdown error")
+        }
+        Err(_) => {
+            #[cfg(unix)]
+            let _ = kill(Pid::from_raw(-pid), Signal::SIGKILL);
+            #[cfg(not(unix))]
+            let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+            child
+                .child
+                .wait()
+                .await
+                .expect("child wait after SIGKILL")
+        }
+    }
+}
+
+fn record_terminal_exit(
+    mgr: &SessionManager,
+    session_id: &Uuid,
+    state: SessionState,
+    status: std::process::ExitStatus,
+) {
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
+
+    mgr.with_mut(session_id, |s| {
+        s.state = state;
+        s.pid = None;
+        s.last_stopped_at = Some(Utc::now());
+        s.exit_code = status.code();
+        #[cfg(unix)]
+        {
+            s.term_signal = status.signal();
+        }
+        #[cfg(not(unix))]
+        {
+            s.term_signal = None;
+        }
+    });
 }

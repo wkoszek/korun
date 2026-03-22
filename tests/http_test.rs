@@ -2,6 +2,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use korun::daemon::router::build_router;
 use korun::daemon::session_mgr::SessionManager;
+use serde_json::Value;
+use tempfile::tempdir;
 use tower::util::ServiceExt;
 
 #[tokio::test]
@@ -89,7 +91,68 @@ async fn create_session_returns_201() {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(json["id"].as_str().is_some());
     assert_eq!(json["state"].as_str().unwrap(), "starting");
+}
+
+#[tokio::test]
+async fn create_session_rejects_invalid_cwd() {
+    let mgr = SessionManager::new();
+    let app = build_router(mgr);
+
+    let body = serde_json::json!({
+        "command": ["echo", "hello"],
+        "cwd": "/definitely/not/a/real/path"
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_session_retains_watcher_handle() {
+    let mgr = SessionManager::new();
+    let app = build_router(mgr.clone());
+    let tmp = tempdir().unwrap();
+    let watch_path = tmp.path().join("watched.txt");
+    std::fs::write(&watch_path, "before").unwrap();
+
+    let body = serde_json::json!({
+        "command": ["sleep", "10"],
+        "cwd": tmp.path(),
+        "watch": ["watched.txt"]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    let id: uuid::Uuid = json["id"].as_str().unwrap().parse().unwrap();
+    assert!(mgr.with(&id, |s| s.watcher.is_some()).unwrap());
 }

@@ -1,10 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 use crate::daemon::buffer::LogBuffer;
+use crate::daemon::watcher::WatcherHandle;
 
 pub const STDOUT_BUF_CAPACITY: usize = 10_000;
 pub const STDERR_BUF_CAPACITY: usize = 10_000;
@@ -57,11 +59,14 @@ pub struct Session {
     pub file_change_count: u64,
     pub last_change_at: Option<DateTime<Utc>>,
     pub last_change_path: Option<String>,
+    pub next_log_seq: Arc<AtomicU64>,
 
     // log buffers
     pub stdout_buf: Arc<Mutex<LogBuffer>>,
     pub stderr_buf: Arc<Mutex<LogBuffer>>,
     pub blended_buf: Arc<Mutex<LogBuffer>>,
+    #[allow(dead_code)]
+    pub watcher: Option<WatcherHandle>,
 
     // inter-task handles
     pub cmd_tx: mpsc::Sender<SessionCommand>,
@@ -69,6 +74,7 @@ pub struct Session {
 }
 
 impl Session {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: Uuid,
         command: Vec<String>,
@@ -77,6 +83,7 @@ impl Session {
         watch: Vec<String>,
         cmd_tx: mpsc::Sender<SessionCommand>,
         log_tx: broadcast::Sender<crate::daemon::buffer::LogEntry>,
+        watcher: Option<WatcherHandle>,
     ) -> Self {
         Self {
             id,
@@ -97,9 +104,11 @@ impl Session {
             file_change_count: 0,
             last_change_at: None,
             last_change_path: None,
+            next_log_seq: Arc::new(AtomicU64::new(0)),
             stdout_buf: Arc::new(Mutex::new(LogBuffer::new(STDOUT_BUF_CAPACITY))),
             stderr_buf: Arc::new(Mutex::new(LogBuffer::new(STDERR_BUF_CAPACITY))),
             blended_buf: Arc::new(Mutex::new(LogBuffer::new(BLENDED_BUF_CAPACITY))),
+            watcher,
             cmd_tx,
             log_tx,
         }
@@ -107,14 +116,24 @@ impl Session {
 
     /// Uptime in milliseconds since last_started_at, or 0.
     pub fn uptime_ms(&self) -> u64 {
-        self.last_started_at
-            .map(|t| {
-                Utc::now()
-                    .signed_duration_since(t)
-                    .num_milliseconds()
-                    .max(0) as u64
-            })
-            .unwrap_or(0)
+        if !matches!(self.state, SessionState::Running | SessionState::Stopping) {
+            return 0;
+        }
+        self.last_started_at.map_or(0, |t| {
+            Utc::now()
+                .signed_duration_since(t)
+                .num_milliseconds()
+                .max(0) as u64
+        })
+    }
+
+    pub fn clear_exit_metadata(&mut self) {
+        self.exit_code = None;
+        self.term_signal = None;
+    }
+
+    pub fn next_seq(&self) -> u64 {
+        self.next_log_seq.load(Ordering::Relaxed)
     }
 }
 

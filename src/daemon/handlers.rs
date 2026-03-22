@@ -9,6 +9,7 @@ use chrono::Utc;
 use futures::StreamExt;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::{Path as FsPath, PathBuf};
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
@@ -74,10 +75,12 @@ pub async fn create_session(
     let cwd = req.cwd.unwrap_or_else(|| "/tmp".to_string());
     let watch = req.watch.unwrap_or_default();
     let env = req.env.unwrap_or_default();
+    validate_create_session_request(&req.command, &cwd, &env)?;
     let id = Uuid::new_v4();
 
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
     let (log_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CAPACITY);
+    let (change_tx, change_rx) = tokio::sync::mpsc::channel::<String>(32);
 
     // Resolve watch paths relative to cwd
     let resolved_watch: Vec<String> = watch
@@ -91,6 +94,15 @@ pub async fn create_session(
         })
         .collect();
 
+    let watcher = if resolved_watch.is_empty() {
+        None
+    } else {
+        Some(
+            start_watcher(resolved_watch.clone(), change_tx)
+                .map_err(|e| AppError::BadRequest(format!("failed to start watcher: {e}")))?,
+        )
+    };
+
     let session = Session::new(
         id,
         req.command,
@@ -99,6 +111,7 @@ pub async fn create_session(
         resolved_watch.clone(),
         cmd_tx.clone(),
         log_tx.clone(),
+        watcher,
     );
     mgr.insert(session);
 
@@ -107,7 +120,7 @@ pub async fn create_session(
         let cmd_tx2 = cmd_tx.clone();
         let mgr2 = mgr.clone();
         let id2 = id;
-        let (change_tx, mut change_rx) = tokio::sync::mpsc::channel::<String>(32);
+        let mut change_rx = change_rx;
 
         // Bridge change events to restart commands
         tokio::spawn(async move {
@@ -123,19 +136,12 @@ pub async fn create_session(
                     .await;
             }
         });
-
-        let watch_paths = resolved_watch.clone();
-        if let Err(e) = start_watcher(watch_paths, change_tx) {
-            tracing::warn!("failed to start watcher: {e}");
-        }
     }
 
-    // Launch supervisor — cleanup wrapper guarantees removal on any exit path
+    // Launch supervisor and keep it alive across terminal states so sessions remain restartable.
     let mgr3 = mgr.clone();
-    let mgr_cleanup = mgr.clone();
     tokio::spawn(async move {
         run_supervisor(id, mgr3, cmd_rx).await;
-        mgr_cleanup.remove(&id); // no-op if supervisor already removed it
     });
 
     Ok((
@@ -235,6 +241,10 @@ pub async fn stop_session(
         .with(&id, |s| (s.state, s.cmd_tx.clone()))
         .ok_or_else(|| AppError::NotFound("session not found".into()))?;
 
+    if matches!(state, SessionState::Exited | SessionState::Failed) {
+        return Err(AppError::BadRequest("session already stopped".into()));
+    }
+
     if state == SessionState::Stopping {
         return Ok(Json(
             serde_json::json!({ "ok": true, "id": id, "state": state }),
@@ -273,8 +283,32 @@ pub async fn get_logs(
     let follow = q.follow.unwrap_or(0) == 1;
     let format = q.format.clone().unwrap_or_else(|| "json".to_string());
 
-    let (entries, next_seq, log_tx) = mgr
+    if !follow {
+        let (entries, next_seq) = mgr
+            .with(&id, |s| {
+                let buf: std::sync::MutexGuard<'_, crate::daemon::buffer::LogBuffer> =
+                    match stream_name.as_str() {
+                        "stdout" => s.stdout_buf.lock().unwrap(),
+                        "stderr" => s.stderr_buf.lock().unwrap(),
+                        _ => s.blended_buf.lock().unwrap(),
+                    };
+                let entries = if let Some(seq) = q.since_seq {
+                    buf.since_seq(seq, limit)
+                } else {
+                    buf.tail(limit)
+                };
+                let next_seq = s.next_seq();
+                drop(buf);
+                (entries, next_seq)
+            })
+            .ok_or_else(|| AppError::NotFound("session not found".into()))?;
+
+        return Ok(render_snapshot(id, &stream_name, entries, next_seq, &format).into_response());
+    }
+
+    let (entries, snapshot_next_seq, rx) = mgr
         .with(&id, |s| {
+            let rx = s.log_tx.subscribe();
             let buf: std::sync::MutexGuard<'_, crate::daemon::buffer::LogBuffer> =
                 match stream_name.as_str() {
                     "stdout" => s.stdout_buf.lock().unwrap(),
@@ -286,24 +320,23 @@ pub async fn get_logs(
             } else {
                 buf.tail(limit)
             };
-            let next_seq = buf.peek_next_seq();
+            let next_seq = s.next_seq();
             drop(buf);
-            (entries, next_seq, s.log_tx.clone())
+            (entries, next_seq, rx)
         })
         .ok_or_else(|| AppError::NotFound("session not found".into()))?;
 
-    if !follow {
-        return Ok(render_snapshot(id, &stream_name, entries, next_seq, &format).into_response());
-    }
-
     // Streaming follow mode
-    let rx = log_tx.subscribe();
     // Both stream_name and format are owned Strings — safe to move into the closure
     let stream_name_clone = stream_name.clone();
     let format_clone = format.clone();
+    let stream_mode = stream_name.clone();
     let stream = BroadcastStream::new(rx).flat_map(move |msg| {
         let line = match msg {
             Ok(entry) => {
+                if entry.seq < snapshot_next_seq {
+                    return futures::stream::empty().left_stream();
+                }
                 // Filter: for blended, show all; for stdout/stderr, show only that stream; for unknown, show nothing
                 let should_include = match stream_name_clone.as_str() {
                     "blended" => true,
@@ -314,7 +347,7 @@ pub async fn get_logs(
                 if !should_include {
                     return futures::stream::empty().left_stream();
                 }
-                format_entry(&entry, &format_clone)
+                format_entry(&entry, &stream_mode, &format_clone)
             }
             Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
                 if format_clone == "text" {
@@ -336,9 +369,10 @@ pub async fn get_logs(
     // First send buffered entries, then stream new ones.
     // Use into_iter() + move to avoid capturing &format (which would prevent 'static bound).
     let format2 = format.clone();
+    let stream_mode2 = stream_name.clone();
     let initial = entries
         .into_iter()
-        .map(move |e| Ok::<_, std::convert::Infallible>(format_entry(&e, &format2)));
+        .map(move |e| Ok::<_, std::convert::Infallible>(format_entry(&e, &stream_mode2, &format2)));
     let combined = futures::stream::iter(initial).chain(stream);
 
     Ok(Body::from_stream(combined).into_response())
@@ -361,7 +395,7 @@ pub async fn get_head(
                 _ => s.blended_buf.lock().unwrap(),
             };
         let entries = buf.head(limit);
-        let next_seq = buf.peek_next_seq();
+        let next_seq = s.next_seq();
         drop(buf);
         render_snapshot(id, &stream_name, entries, next_seq, &format)
     })
@@ -408,12 +442,54 @@ fn render_snapshot(
     .into_response()
 }
 
-fn format_entry(entry: &LogEntry, format: &str) -> String {
+fn format_entry(entry: &LogEntry, requested_stream: &str, format: &str) -> String {
     if format == "text" {
-        format!("[{}] {}\n", stream_label(entry.stream), entry.line)
+        if requested_stream == "blended" {
+            format!("[{}] {}\n", stream_label(entry.stream), entry.line)
+        } else {
+            format!("{}\n", entry.line)
+        }
     } else {
         format!("{}\n", serde_json::to_string(entry).unwrap_or_default())
     }
+}
+
+fn validate_create_session_request(
+    command: &[String],
+    cwd: &str,
+    env: &HashMap<String, String>,
+) -> Result<(), AppError> {
+    let cwd_path = FsPath::new(cwd);
+    if !cwd_path.is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "cwd does not exist or is not a directory: {cwd}"
+        )));
+    }
+
+    let program = &command[0];
+    let exists = if program.contains(std::path::MAIN_SEPARATOR) {
+        let path = if FsPath::new(program).is_absolute() {
+            PathBuf::from(program)
+        } else {
+            cwd_path.join(program)
+        };
+        path.exists()
+    } else {
+        let path_env = env
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .or_else(|| std::env::var_os("PATH"))
+            .unwrap_or_default();
+        std::env::split_paths(&path_env).any(|dir| dir.join(program).exists())
+    };
+
+    if !exists {
+        return Err(AppError::BadRequest(format!(
+            "command not found: {program}"
+        )));
+    }
+
+    Ok(())
 }
 
 fn stream_label(s: Stream) -> &'static str {

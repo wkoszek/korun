@@ -21,7 +21,7 @@ pub struct LogEntry {
 pub struct LogBuffer {
     entries: VecDeque<LogEntry>,
     capacity: usize,
-    seq_counter: u64, // private; exposed via peek_next_seq()
+    next_seq: u64,
     pub dropped: u64,
     pub total_bytes: u64,
 }
@@ -31,15 +31,21 @@ impl LogBuffer {
         Self {
             entries: VecDeque::with_capacity(capacity.min(1024)),
             capacity,
-            seq_counter: 0,
+            next_seq: 0,
             dropped: 0,
             total_bytes: 0,
         }
     }
 
+    #[allow(dead_code)]
     pub fn push(&mut self, stream: Stream, line: String, ts: DateTime<Utc>) -> u64 {
-        let seq = self.seq_counter;
-        self.seq_counter += 1;
+        let seq = self.next_seq;
+        self.push_with_seq(seq, stream, line, ts);
+        seq
+    }
+
+    pub fn push_with_seq(&mut self, seq: u64, stream: Stream, line: String, ts: DateTime<Utc>) {
+        self.next_seq = seq.saturating_add(1);
         if stream != Stream::System {
             self.total_bytes += line.len() as u64 + 1;
         }
@@ -53,7 +59,6 @@ impl LogBuffer {
             stream,
             line,
         });
-        seq
     }
 
     /// Returns last `limit` entries (newest).
@@ -86,8 +91,9 @@ impl LogBuffer {
     }
 
     /// The seq number that the next push() call will assign.
+    #[allow(dead_code)]
     pub fn peek_next_seq(&self) -> u64 {
-        self.seq_counter
+        self.next_seq
     }
 }
 

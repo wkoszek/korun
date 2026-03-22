@@ -70,6 +70,7 @@ impl SessionManager {
     }
 
     /// Remove a session from the manager.
+    #[allow(dead_code)]
     pub fn remove(&self, id: &Uuid) {
         self.inner
             .write()
@@ -111,6 +112,7 @@ mod tests {
             vec![],
             cmd_tx,
             log_tx,
+            None,
         )
     }
 
