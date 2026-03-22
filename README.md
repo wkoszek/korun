@@ -1,5 +1,7 @@
 # korun
 
+> **⚠ Experimental:** This project is in early development. APIs, configuration formats, and behavior may change without notice.
+
 This is a process runner.
 It's a local developer process runner built for the era of AI-assisted coding.
 It's like 'air' for Golang, but you can configure it in more ways.
