@@ -4,6 +4,13 @@ pub mod serve;
 use crate::cli::client::{new_client, new_streaming_client, DEFAULT_ADDR};
 use anyhow::{Context, Result};
 
+fn is_active_session(session: &serde_json::Value) -> bool {
+    matches!(
+        session["state"].as_str(),
+        Some("starting" | "running" | "stopping")
+    )
+}
+
 async fn read_json_response(resp: reqwest::Response) -> Result<serde_json::Value> {
     let status = resp.status();
     let body = resp.json::<serde_json::Value>().await?;
@@ -38,9 +45,10 @@ async fn resolve_id(id: Option<String>) -> Result<String> {
     let arr = sessions["sessions"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("unexpected response from daemon"))?;
-    match arr.len() {
+    let active: Vec<&serde_json::Value> = arr.iter().filter(|s| is_active_session(s)).collect();
+    match active.len() {
         0 => anyhow::bail!("no active sessions"),
-        1 => arr[0]["id"]
+        1 => active[0]["id"]
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("session has no id")),
@@ -131,6 +139,7 @@ pub async fn cmd_stop_all() -> Result<()> {
         .as_array()
         .map(|arr| {
             arr.iter()
+                .filter(|s| is_active_session(s))
                 .filter_map(|s| s["id"].as_str().map(|s| s.to_string()))
                 .collect()
         })

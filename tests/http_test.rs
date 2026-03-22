@@ -5,6 +5,7 @@ use korun::daemon::session_mgr::SessionManager;
 use serde_json::Value;
 use tempfile::tempdir;
 use tower::util::ServiceExt;
+use tokio::time::{timeout, Duration};
 
 #[tokio::test]
 async fn healthz_returns_200() {
@@ -155,4 +156,55 @@ async fn create_session_retains_watcher_handle() {
     let json: Value = serde_json::from_slice(&bytes).unwrap();
     let id: uuid::Uuid = json["id"].as_str().unwrap().parse().unwrap();
     assert!(mgr.with(&id, |s| s.watcher.is_some()).unwrap());
+}
+
+#[tokio::test]
+async fn follow_logs_closes_after_process_exits() {
+    let mgr = SessionManager::new();
+    let app = build_router(mgr);
+
+    let body = serde_json::json!({
+        "command": ["sh", "-c", "echo hi"]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    let id = json["id"].as_str().unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/sessions/{id}/logs?follow=1&format=text"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = timeout(
+        Duration::from_secs(2),
+        axum::body::to_bytes(response.into_body(), usize::MAX),
+    )
+    .await
+    .expect("follow stream should close after process exit")
+    .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.contains("[stdout] hi"));
 }

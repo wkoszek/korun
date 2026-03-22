@@ -10,7 +10,6 @@ use futures::StreamExt;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
-use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 use crate::daemon::buffer::{LogEntry, Stream};
@@ -327,44 +326,57 @@ pub async fn get_logs(
         .ok_or_else(|| AppError::NotFound("session not found".into()))?;
 
     // Streaming follow mode
-    // Both stream_name and format are owned Strings — safe to move into the closure
-    let stream_name_clone = stream_name.clone();
     let format_clone = format.clone();
-    let stream_mode = stream_name.clone();
-    let stream = BroadcastStream::new(rx).flat_map(move |msg| {
-        let line = match msg {
-            Ok(entry) => {
-                if entry.seq < snapshot_next_seq {
-                    return futures::stream::empty().left_stream();
+    let mgr_for_follow = mgr.clone();
+    let stream = futures::stream::unfold(
+        FollowState {
+            rx,
+            mgr: mgr_for_follow,
+            session_id: id,
+            stream_name: stream_name.clone(),
+            format: format_clone,
+            cutoff_seq: snapshot_next_seq,
+            last_seen_seq: snapshot_next_seq,
+        },
+        |mut state| async move {
+            loop {
+                tokio::select! {
+                    msg = state.rx.recv() => {
+                        match msg {
+                            Ok(entry) => {
+                                if entry.seq < state.cutoff_seq {
+                                    continue;
+                                }
+                                if !should_include_stream(&state.stream_name, entry.stream) {
+                                    continue;
+                                }
+                                state.last_seen_seq = state.last_seen_seq.max(entry.seq.saturating_add(1));
+                                let line = format_entry(&entry, &state.stream_name, &state.format);
+                                return Some((Ok::<_, std::convert::Infallible>(line), state));
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                let line = format_lag_notice(n, &state.format);
+                                return Some((Ok::<_, std::convert::Infallible>(line), state));
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                        }
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                        let (is_terminal, next_seq) = match state
+                            .mgr
+                            .with(&state.session_id, |s| (matches!(s.state, SessionState::Exited | SessionState::Failed), s.next_seq()))
+                        {
+                            Some(values) => values,
+                            None => return None,
+                        };
+                        if is_terminal && next_seq <= state.last_seen_seq {
+                            return None;
+                        }
+                    }
                 }
-                // Filter: for blended, show all; for stdout/stderr, show only that stream; for unknown, show nothing
-                let should_include = match stream_name_clone.as_str() {
-                    "blended" => true,
-                    "stdout" => entry.stream == Stream::Stdout,
-                    "stderr" => entry.stream == Stream::Stderr,
-                    _ => false, // unknown stream name → no entries
-                };
-                if !should_include {
-                    return futures::stream::empty().left_stream();
-                }
-                format_entry(&entry, &stream_mode, &format_clone)
             }
-            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
-                if format_clone == "text" {
-                    format!("[korun: dropped {n} lines]\n")
-                } else {
-                    let e = serde_json::json!({
-                        "seq": 0u64,
-                        "ts": Utc::now().to_rfc3339(),
-                        "stream": "system",
-                        "line": format!("dropped {n} lines"),
-                    });
-                    format!("{e}\n")
-                }
-            }
-        };
-        futures::stream::once(async move { Ok::<_, std::convert::Infallible>(line) }).right_stream()
-    });
+        },
+    );
 
     // First send buffered entries, then stream new ones.
     // Use into_iter() + move to avoid capturing &format (which would prevent 'static bound).
@@ -452,6 +464,39 @@ fn format_entry(entry: &LogEntry, requested_stream: &str, format: &str) -> Strin
     } else {
         format!("{}\n", serde_json::to_string(entry).unwrap_or_default())
     }
+}
+
+fn should_include_stream(stream_name: &str, stream: Stream) -> bool {
+    match stream_name {
+        "blended" => true,
+        "stdout" => stream == Stream::Stdout,
+        "stderr" => stream == Stream::Stderr,
+        _ => false,
+    }
+}
+
+fn format_lag_notice(n: u64, format: &str) -> String {
+    if format == "text" {
+        format!("[korun: dropped {n} lines]\n")
+    } else {
+        let e = serde_json::json!({
+            "seq": 0u64,
+            "ts": Utc::now().to_rfc3339(),
+            "stream": "system",
+            "line": format!("dropped {n} lines"),
+        });
+        format!("{e}\n")
+    }
+}
+
+struct FollowState {
+    rx: tokio::sync::broadcast::Receiver<LogEntry>,
+    mgr: AppState,
+    session_id: Uuid,
+    stream_name: String,
+    format: String,
+    cutoff_seq: u64,
+    last_seen_seq: u64,
 }
 
 fn validate_create_session_request(
